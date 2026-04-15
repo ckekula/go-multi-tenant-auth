@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ckekula/go-multi-tenant-auth/internal/services"
+	"go-multi-tenant-auth/internal/services"
 )
 
 // contextKey is an unexported type to avoid collisions in context values.

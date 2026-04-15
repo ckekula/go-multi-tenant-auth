@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/ckekula/go-multi-tenant-auth/internal/services"
+	"go-multi-tenant-auth/internal/services"
 )
 
 // Register wires all routes onto mux.

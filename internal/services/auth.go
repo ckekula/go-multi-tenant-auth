@@ -57,6 +57,10 @@ type jwksResponse struct {
 	Keys []json.RawMessage `json:"keys"`
 }
 
+type KeySet struct {
+	Keys map[string]interface{}
+}
+
 // NewAuthService fetches the OIDC discovery document, resolves the JWKS URI,
 // and wires up token validation. Call once at startup.
 func NewAuthService(ctx context.Context, cfg Config, logger *slog.Logger) (*AuthService, error) {
@@ -121,7 +125,7 @@ func (s *AuthService) loadKeyFunc(ctx context.Context) error {
 }
 
 // fetchJWKS downloads the JWKS and parses it into a keyset.
-func (s *AuthService) fetchJWKS(ctx context.Context, uri string) (*jwt.StaticKeySet, error) {
+func (s *AuthService) fetchJWKS(ctx context.Context, uri string) (*KeySet, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
 	if err != nil {
 		return nil, err
@@ -141,7 +145,7 @@ func (s *AuthService) fetchJWKS(ctx context.Context, uri string) (*jwt.StaticKey
 		return nil, err
 	}
 
-	keyset := &jwt.StaticKeySet{Keys: make(map[string]interface{})}
+	keyset := &KeySet{Keys: make(map[string]interface{})}
 	for _, keyJSON := range raw.Keys {
 		key, kid, err := parseJWK(keyJSON)
 		if err != nil {
@@ -176,7 +180,7 @@ func (s *AuthService) ValidateToken(tokenStr string) (*TenantClaims, error) {
 
 // buildKeyFunc returns a jwt.Keyfunc that looks up the signing key by kid
 // and validates issuer + audience.
-func buildKeyFunc(ks *jwt.StaticKeySet, issuer, clientID string) jwt.Keyfunc {
+func buildKeyFunc(ks *KeySet, issuer, clientID string) jwt.Keyfunc {
 	return func(t *jwt.Token) (interface{}, error) {
 		// Enforce algorithm family (RS256/ES256 only — never "none").
 		switch t.Method.(type) {

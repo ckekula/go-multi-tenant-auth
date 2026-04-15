@@ -7,8 +7,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/ckekula/go-multi-tenant-auth/internal/handlers"
-	"github.com/ckekula/go-multi-tenant-auth/internal/services"
+	"go-multi-tenant-auth/internal/handlers"
+	"go-multi-tenant-auth/internal/services"
 )
 
 func main() {
