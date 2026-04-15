@@ -2,66 +2,68 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log/slog"
-	"net/http"
+	"net"
 	"os"
-	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 
 	"go-multi-tenant-auth/internal/handlers"
-	"go-multi-tenant-auth/internal/services"
+	proto "go-multi-tenant-auth/internal/handlers/proto"
+
+	"github.com/zitadel/zitadel-go/v3/pkg/authorization"
+	"github.com/zitadel/zitadel-go/v3/pkg/authorization/oauth"
+	"github.com/zitadel/zitadel-go/v3/pkg/grpc/middleware"
+	"github.com/zitadel/zitadel-go/v3/pkg/zitadel"
+)
+
+var (
+	// flags to be provided for running the example server
+	domain = flag.String("domain", "", "your ZITADEL instance domain (in the form: <instance>.zitadel.cloud or <yourdomain>)")
+	key    = flag.String("key", "", "path to your key.json")
+	port   = flag.String("port", "8089", "port to run the server on (default is 8089)")
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	flag.Parse()
 
-	cfg := services.Config{
-		ZitadelDomain: requireEnv("ZITADEL_DOMAIN"),
-		ClientID:      requireEnv("ZITADEL_CLIENT_ID"),
-		Port:          getEnv("PORT", "8080"),
-	}
+	ctx := context.Background()
 
-	// Bootstrap JWKS fetcher (uses discovery endpoint internally)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	authSvc, err := services.NewAuthService(ctx, cfg, logger)
+	// Initiate the authorization by providing a zitadel configuration and a verifier.
+	// This example will use OAuth2 Introspection for this, therefore you will also need to provide the downloaded api key.json
+	authZ, err := authorization.New(ctx, zitadel.New(*domain), oauth.DefaultAuthorization(*key))
 	if err != nil {
-		logger.Error("failed to initialise auth service", "error", err)
+		slog.Error("zitadel sdk could not initialize", "error", err)
 		os.Exit(1)
 	}
 
-	mux := http.NewServeMux()
-	handlers.Register(mux, authSvc, logger)
+	// Initialize the GRPC middleware by providing the sdk and the authorization checks
+	mw := middleware.New(authZ, handlers.Checks)
 
-	addr := ":" + cfg.Port
-	logger.Info("server starting", "addr", addr)
-
-	srv := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  60 * time.Second,
+	// Create the GRPC server and provide the necessary interceptors
+	serverOptions := []grpc.ServerOption{
+		grpc.UnaryInterceptor(mw.Unary()),
+		grpc.StreamInterceptor(mw.Stream()),
 	}
+	grpcServer := grpc.NewServer(serverOptions...)
 
-	if err := srv.ListenAndServe(); err != nil {
-		logger.Error("server stopped", "error", err)
+	// Register your server implementation
+	proto.RegisterAuthServiceServer(grpcServer, handlers.NewServer(mw))
+	// for easier use, we also register the grpc server reflection
+	reflection.Register(grpcServer)
+
+	// finally start the server on port 8099
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%s", *port))
+	if err != nil {
+		slog.Error("creating listener failed", "error", err)
 		os.Exit(1)
 	}
-}
-
-func requireEnv(key string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		slog.Error("required environment variable not set", "key", key)
+	err = grpcServer.Serve(lis)
+	if err != nil {
+		slog.Error("server terminated", "error", err)
 		os.Exit(1)
 	}
-	return v
-}
-
-func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
