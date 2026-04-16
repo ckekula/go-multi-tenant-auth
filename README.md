@@ -24,7 +24,7 @@ A multi-tenant gRPC authentication and authorization service built with Go and [
 
 ## Architecture overview
 
-![alt text](image.png)
+![alt text](architecture.png)
 ```
 Client
   │  gRPC + metadata: x-tenant-id, Authorization: Bearer <token>
