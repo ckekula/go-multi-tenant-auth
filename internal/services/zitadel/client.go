@@ -19,7 +19,7 @@ var (
 	keyPath = flag.String("key", "", "path to your service user's key.json file")
 )
 
-func main() {
+func Run() {
 	flag.Parse()
 	ctx := context.Background()
 

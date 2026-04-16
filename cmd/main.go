@@ -13,6 +13,7 @@ import (
 
 	"go-multi-tenant-auth/internal/handlers"
 	proto "go-multi-tenant-auth/internal/handlers/proto"
+	"go-multi-tenant-auth/internal/tenant"
 
 	"github.com/zitadel/zitadel-go/v3/pkg/authorization"
 	"github.com/zitadel/zitadel-go/v3/pkg/authorization/oauth"
@@ -44,9 +45,20 @@ func main() {
 	mw := middleware.New(authZ, handlers.Checks)
 
 	// Create the GRPC server and provide the necessary interceptors
+	registry := tenant.NewRegistry(map[string]string{
+		"acme-corp": "zitadel-org-id-abc123",
+		"globex":    "zitadel-org-id-def456",
+	})
+
 	serverOptions := []grpc.ServerOption{
-		grpc.UnaryInterceptor(mw.Unary()),
-		grpc.StreamInterceptor(mw.Stream()),
+		grpc.ChainUnaryInterceptor(
+			tenant.NewUnaryInterceptor(registry), // runs first
+			mw.Unary(),                           // auth runs second
+		),
+		grpc.ChainStreamInterceptor(
+			tenant.NewStreamInterceptor(registry),
+			mw.Stream(),
+		),
 	}
 	grpcServer := grpc.NewServer(serverOptions...)
 

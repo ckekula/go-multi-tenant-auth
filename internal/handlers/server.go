@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	proto "go-multi-tenant-auth/internal/handlers/proto"
+	"go-multi-tenant-auth/internal/tenant"
 
 	"github.com/zitadel/zitadel-go/v3/pkg/authorization"
 	"github.com/zitadel/zitadel-go/v3/pkg/authorization/oauth"
@@ -23,26 +25,24 @@ var (
 	// If an endpoint (e.g. [proto.AuthService_Healthz_FullMethodName]) is not added to the list, it will be publicly accessible.
 	// By adding specific [authorization.CheckOption], additional requirements like role checks ([authorization.WithRole]) can be defined.
 	Checks = map[string][]authorization.CheckOption{
-		proto.AuthService_Healthz_FullMethodName:  nil,
-		proto.AuthService_AddTask_FullMethodName:  {authorization.WithRole("admin")},
-		proto.AuthService_AddTasks_FullMethodName: {authorization.WithRole("admin")},
+		proto.AuthService_Healthz_FullMethodName:   nil,
+		proto.AuthService_AddTask_FullMethodName:   {authorization.WithRole("admin")},
+		proto.AuthService_AddTasks_FullMethodName:  {authorization.WithRole("admin")},
+		proto.AuthService_ListTasks_FullMethodName: nil, // requires valid token, no role
 	}
 )
-
-func NewServer(mw *middleware.Interceptor[*oauth.IntrospectionContext]) *Server {
-	return &Server{
-		tasks: make([]string, 0),
-		mw:    mw,
-	}
-}
 
 type Server struct {
 	proto.UnimplementedAuthServiceServer
 
 	mw *middleware.Interceptor[*oauth.IntrospectionContext]
-
+	mu sync.RWMutex
 	// tasks are used to store an in-memory list used in the protected endpoint
-	tasks []string
+	tasks map[string][]string // orgID -> tasks
+}
+
+func NewServer(mw *middleware.Interceptor[*oauth.IntrospectionContext]) *Server {
+	return &Server{mw: mw, tasks: make(map[string][]string)}
 }
 
 // Healthz is accessible by anyone and will always return "OK" to indicate the API is running
@@ -56,6 +56,12 @@ func (s *Server) Healthz(_ context.Context, _ *proto.HealthzRequest) (*proto.Hea
 // It will list all stored tasks. In case the user is granted the `admin` role it will add a separate task telling him
 // to add a new task.
 func (s *Server) ListTasks(ctx context.Context, _ *proto.ListTasksRequest) (*proto.ListTasksResponse, error) {
+	// Scope tasks by orgID
+	orgID := tenant.OrgIDFromCtx(ctx)
+	s.mu.RLock()
+	taskList := append([]string{}, s.tasks[orgID]...)
+	s.mu.RUnlock()
+
 	// Using the [middleware.Context] function we can gather information about the authorized user.
 	// This example will just print the users ID using the provided method, and it will also
 	// print the username by directly access the field of the typed [*oauth.IntrospectionContext].
@@ -64,14 +70,11 @@ func (s *Server) ListTasks(ctx context.Context, _ *proto.ListTasksRequest) (*pro
 
 	// Although this endpoint is accessible by any authorized user, you might want to take additional steps
 	// if the user is granted a specific role. In this case an `admin` will be informed to add a new task:
-	taskList := s.tasks
 	if authCtx.IsGrantedRole("admin") {
 		taskList = append(taskList, "create a new task with `AddTask`")
 	}
 
-	return &proto.ListTasksResponse{
-		Tasks: taskList,
-	}, nil
+	return &proto.ListTasksResponse{Tasks: taskList}, nil
 }
 
 // AddTask is only accessible with a valid authorization, which was granted the `admin` role (in any organization).
@@ -82,8 +85,11 @@ func (s *Server) AddTask(ctx context.Context, req *proto.AddTaskRequest) (*proto
 		return nil, status.Error(codes.InvalidArgument, "task must not be empty")
 	}
 
-	// since it was not empty, let's add it to the existing list
-	s.tasks = append(s.tasks, req.GetTask())
+	// Scope tasks by orgID
+	orgID := tenant.OrgIDFromCtx(ctx)
+	s.mu.Lock()
+	s.tasks[orgID] = append(s.tasks[orgID], req.GetTask())
+	s.mu.Unlock()
 
 	// since we only want the authorized userID and don't need any specific data, we can simply use [authorization.UserID]
 	slog.Info("admin added task", "id", authorization.UserID(ctx), "task", req.GetTask())
@@ -99,6 +105,7 @@ func (s *Server) AddTask(ctx context.Context, req *proto.AddTaskRequest) (*proto
 // It will also add the provided task(s) to the list of existing ones.
 func (s *Server) AddTasks(stream proto.AuthService_AddTasksServer) error {
 	var count uint32
+	orgID := tenant.OrgIDFromCtx(stream.Context())
 	for {
 		req, err := stream.Recv()
 		if err == io.EOF {
@@ -117,7 +124,9 @@ func (s *Server) AddTasks(stream proto.AuthService_AddTasksServer) error {
 		// If there was no error, let's check if the task was not empty and then directly add it to the list.
 		// We'll also log it again and count up the amount.
 		if req.GetTask() != "" {
-			s.tasks = append(s.tasks, req.GetTask())
+			s.mu.Lock()
+			s.tasks[orgID] = append(s.tasks[orgID], req.GetTask())
+			s.mu.Unlock()
 			slog.Info("admin added task", "id", authorization.UserID(stream.Context()), "task", req.GetTask())
 			count++
 		}
